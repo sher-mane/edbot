@@ -9,12 +9,14 @@ import subprocess
 
 # Your OpenAI key
 openai.api_key = "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"
+client = openai.OpenAI(api_key="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")
 
 # Wake word
-WAKE_WORD = "hey pi"
+WAKE_WORD = "hello"
 
 # Speaker device (replace with your actual USB speaker device string from `aplay -L`)
 USB_SPEAKER_DEVICE = "plughw:CARD=UACDemoV10,DEV=0"
+
 
 # Use pyttsx3 with espeak engine and USB speaker via ALSA
 def speak(text):
@@ -22,15 +24,23 @@ def speak(text):
     command = f'espeak "{text}" --stdout | aplay -D {USB_SPEAKER_DEVICE}'
     subprocess.run(command, shell=True)
 
+#def transcribe_audio(filename):
+#    print("🧠 Transcribing...")
+#    with open(filename, 'rb') as audio_file:
+#        result = openai.Audio.transcribe("whisper-1", audio_file)
+#    return result["text"]
+
 def transcribe_audio(filename):
-    print("🧠 Transcribing...")
-    with open(filename, 'rb') as audio_file:
-        result = openai.Audio.transcribe("whisper-1", audio_file)
-    return result["text"]
+    with open(filename, "rb") as f:
+        transcription = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=f
+        )
+    return transcription.text
 
 def chat_with_gpt(prompt):
     print("🤖 ChatGPT responding...")
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-4",  # Or gpt-3.5-turbo
         messages=[{"role": "user", "content": prompt}]
     )
