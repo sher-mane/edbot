@@ -30,6 +30,14 @@ def listen_for_wake_word(recognizer, mic):
         print(f"API Error: {e}")
         return False
 
+def get_chatgpt_response(prompt):
+    print("🤖 Sending to ChatGPT...")
+    response = openai.ChatCompletion.create(
+        model="gpt-4",  # You can also use "gpt-3.5-turbo"
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content.strip()
+
 def listen_and_save(recognizer, mic, filename="command.wav"):
     print("🎤 Listening for your command (speak now)...")
     with mic as source:
@@ -46,10 +54,14 @@ def main():
         try:
             if listen_for_wake_word(recognizer, mic):
                 print("🎉 Wake word detected!")
+                speak("Yes?")
                 audio_path = listen_and_save(recognizer, mic)
                 text = transcribe_with_openai(audio_path)
                 print(f"✅ You said: {text}")
                 print("-" * 50)
+
+                chat_response = get_chatgpt_response(text)
+                speak(chat_response)
             else:
                 time.sleep(0.5)
         except KeyboardInterrupt:
