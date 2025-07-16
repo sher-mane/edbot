@@ -3,7 +3,7 @@
 sudo apt install portaudio19-dev
 pip install pyaudio
 pip install openai
-
+pip install pyttsx3
 
 # for whisper via OPENAI Cloud
 #pip install requests
