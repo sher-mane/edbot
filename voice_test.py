@@ -7,6 +7,7 @@ openai.api_key = "sk-proj-dAYlA1n-vqDpZqDr9Q5IDU3lzbLeZamgZ55mZ6rnmLt4KTovphWgqh
 
 # Wake word
 WAKE_WORD = "hey pi"
+mic = sr.Microphone(device_index=1)  # change index if needed
 
 def transcribe_with_openai(audio_file_path):
     print("🧠 Transcribing with OpenAI...")
