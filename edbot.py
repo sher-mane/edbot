@@ -23,6 +23,7 @@ MAX_LORE = 40
 MAX_USER_MEMORY = 20
 MAX_TRAIT_HISTORY = 30
 MAX_IMAGES_PER_MESSAGE = 3
+STATEMENT_REPLY_CHANCE = 0.35  # chance Ed weighs in on a non-question message
 
 URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
@@ -192,6 +193,10 @@ def _build_user_content(text, image_blocks: list):
     return content
 
 
+def _looks_like_question(text: str) -> bool:
+    return "?" in text
+
+
 def _classify_urls(text: str):
     """Return (direct_image_urls, share_link_urls) found in text."""
     direct, share = [], []
@@ -212,6 +217,18 @@ def _extract_og_image(html: str):
         return None
     content = CONTENT_ATTR_PATTERN.search(tag.group(0))
     return content.group(1) if content else None
+
+
+def _sniff_image_media_type(data: bytes):
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def _load_api_key(conf_path: Path) -> str:
@@ -361,10 +378,13 @@ class EdBot(commands.Cog):
             if not attachment.content_type or not attachment.content_type.startswith("image/"):
                 continue
             data = await attachment.read()
+            media_type = _sniff_image_media_type(data)
+            if media_type is None:
+                continue
             encoded = base64.standard_b64encode(data).decode("utf-8")
             blocks.append({
                 "type": "image",
-                "source": {"type": "base64", "media_type": attachment.content_type, "data": encoded},
+                "source": {"type": "base64", "media_type": media_type, "data": encoded},
             })
         if len(blocks) >= MAX_IMAGES_PER_MESSAGE:
             return blocks
@@ -684,21 +704,29 @@ class EdBot(commands.Cog):
             system_prompt += "\n\n" + _lore_block(lore)
         image_blocks = await self._image_content_blocks(message.attachments, message.content)
         user_content = _build_user_content(message.content, image_blocks)
+        should_reply = (
+            bool(image_blocks)
+            or _looks_like_question(message.content)
+            or random.random() < STATEMENT_REPLY_CHANCE
+        )
         async with self.locks[message.channel.id]:
             history = self.histories.setdefault(message.channel.id, [])
             history.append({"role": "user", "content": user_content})
-            async with message.channel.typing():
-                if message.content:
-                    (reply, reply_usage), (analysis, analysis_usage) = await asyncio.gather(
-                        asyncio.to_thread(self._complete, system_prompt, history),
-                        asyncio.to_thread(self._analyze_message, message.content),
-                    )
-                else:
-                    reply, reply_usage = await asyncio.to_thread(self._complete, system_prompt, history)
-                    analysis, analysis_usage = None, None
-            history.append({"role": "assistant", "content": reply})
-            if image_blocks:
-                history[-2]["content"] = message.content or "[image attached]"
+            analysis = analysis_usage = reply = reply_usage = None
+            if should_reply:
+                async with message.channel.typing():
+                    if message.content:
+                        (reply, reply_usage), (analysis, analysis_usage) = await asyncio.gather(
+                            asyncio.to_thread(self._complete, system_prompt, history),
+                            asyncio.to_thread(self._analyze_message, message.content),
+                        )
+                    else:
+                        reply, reply_usage = await asyncio.to_thread(self._complete, system_prompt, history)
+                history.append({"role": "assistant", "content": reply})
+                if image_blocks:
+                    history[-2]["content"] = message.content or "[image attached]"
+            elif message.content:
+                analysis, analysis_usage = await asyncio.to_thread(self._analyze_message, message.content)
             del history[:-HISTORY_LIMIT]
             if analysis is not None:
                 deltas = analysis["trait_deltas"]
@@ -713,8 +741,9 @@ class EdBot(commands.Cog):
                 if analysis["user_fact_note"]:
                     await self._add_user_fact(message.author, analysis["user_fact_note"])
                 await self._add_usage(message.guild, "haiku", analysis_usage)
-            await self._add_usage(message.guild, "sonnet", reply_usage)
-            await self._send_chunked(message.channel, reply)
+            if should_reply:
+                await self._add_usage(message.guild, "sonnet", reply_usage)
+                await self._send_chunked(message.channel, reply)
 
     async def _handle_mention(self, message: discord.Message):
         member = message.author
