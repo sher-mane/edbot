@@ -104,6 +104,17 @@ class EdBot(commands.Cog):
         for i in range(0, len(text), 2000):
             await destination.send(text[i : i + 2000])
 
+    async def _resolve_guild(self, ctx: commands.Context):
+        if ctx.guild is not None:
+            return ctx.guild
+        if len(self.bot.guilds) == 1:
+            return self.bot.guilds[0]
+        await ctx.send(
+            "I'm in more than one server, so I can't tell which one this is for. "
+            "Please run this command in a server channel instead."
+        )
+        return None
+
     def _trait_deltas(self, user_message: str) -> dict:
         response = self.client.messages.create(
             model="claude-haiku-4-5",
@@ -140,37 +151,43 @@ class EdBot(commands.Cog):
         await self._send_chunked(ctx, reply)
 
     @commands.command()
-    @commands.guild_only()
     async def edbotchannel(self, ctx: commands.Context, channel: discord.TextChannel = None):
         """Set (or clear, if called with no channel) the channel Ed chats freely in."""
+        guild = await self._resolve_guild(ctx)
+        if guild is None:
+            return
         if channel is None:
-            await self.config.guild(ctx.guild).chat_channel.clear()
+            await self.config.guild(guild).chat_channel.clear()
             await ctx.send("Free chat is now off.")
         else:
-            await self.config.guild(ctx.guild).chat_channel.set(channel.id)
+            await self.config.guild(guild).chat_channel.set(channel.id)
             await ctx.send(f"I'll chat freely in {channel.mention} now.")
 
     @commands.command()
-    @commands.guild_only()
     async def attitude(self, ctx: commands.Context, *, description: str):
         """Set Ed's free-chat attitude. Give a short description and Claude expands it into a full persona."""
+        guild = await self._resolve_guild(ctx)
+        if guild is None:
+            return
         expanded = self._complete(
             ATTITUDE_WRITER_SYSTEM_PROMPT,
             [{"role": "user", "content": description}],
         )
-        await self.config.guild(ctx.guild).chat_attitude.set(expanded)
-        await self.config.guild(ctx.guild).traits.set(dict(DEFAULT_TRAITS))
+        await self.config.guild(guild).chat_attitude.set(expanded)
+        await self.config.guild(guild).traits.set(dict(DEFAULT_TRAITS))
         await self._send_chunked(ctx, f"Got it. New attitude:\n{expanded}")
 
     @commands.command()
-    @commands.guild_only()
     async def edbotpersonality(self, ctx: commands.Context, action: str = None):
         """Show Ed's current evolving personality levels. Pass "reset" to reset them."""
+        guild = await self._resolve_guild(ctx)
+        if guild is None:
+            return
         if action and action.lower() == "reset":
-            await self.config.guild(ctx.guild).traits.set(dict(DEFAULT_TRAITS))
+            await self.config.guild(guild).traits.set(dict(DEFAULT_TRAITS))
             await ctx.send("Ed's personality has been reset to neutral.")
             return
-        traits = await self.config.guild(ctx.guild).traits()
+        traits = await self.config.guild(guild).traits()
         lines = "\n".join(f"{name.capitalize()}: {traits[name]}/100" for name in TRAIT_ORDER)
         await ctx.send(f"Ed's current personality:\n{lines}")
 
