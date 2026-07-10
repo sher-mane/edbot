@@ -2,14 +2,18 @@ import asyncio
 import collections
 import configparser
 import json
+import time
 from pathlib import Path
 
 import anthropic
 import discord
+from discord.ext import tasks
 from redbot.core import Config, commands
 
 MODEL = "claude-sonnet-5"
 HISTORY_LIMIT = 20  # ~10 user/assistant turns kept per channel
+IDLE_THRESHOLD_SECONDS = 10 * 60 * 60  # 10 hours
+IDLE_CHECK_INTERVAL_MINUTES = 30
 
 ASK_SYSTEM_PROMPT = (
     "You are Ed, a snarky, thoroughly disgruntled IT support employee who has "
@@ -66,6 +70,13 @@ TRAIT_ANALYST_SYSTEM_PROMPT = (
     "patience: lower this for rude, repetitive, or demanding messages; raise "
     "it for polite, easygoing ones."
 )
+IDLE_KICKOFF_PROMPT = (
+    "No one has said anything in a while. Say something on your own "
+    "initiative - something interesting, funny, or poignant. If there's "
+    "relevant earlier conversation above, follow up on it or bring it back "
+    "up naturally; otherwise just start something new. Keep it brief and in "
+    "character."
+)
 
 
 def _traits_block(traits: dict) -> str:
@@ -95,8 +106,13 @@ class EdBot(commands.Cog):
             chat_channels=[], chat_attitude=DEFAULT_ATTITUDE, traits=DEFAULT_TRAITS
         )
         self.config.register_user(friendly_mode=False)
+        self.config.register_channel(last_activity=0.0)
         self.histories: dict[int, list[dict]] = {}
         self.locks: collections.defaultdict[int, asyncio.Lock] = collections.defaultdict(asyncio.Lock)
+        self.idle_check_loop.start()
+
+    def cog_unload(self):
+        self.idle_check_loop.cancel()
 
     def _complete(self, system_prompt: str, messages: list[dict]) -> str:
         response = self.client.messages.create(
@@ -132,6 +148,36 @@ class EdBot(commands.Cog):
         )
         text = next(block.text for block in response.content if block.type == "text")
         return json.loads(text)
+
+    async def _send_idle_message(self, guild: discord.Guild, channel: discord.TextChannel):
+        attitude = await self.config.guild(guild).chat_attitude()
+        traits = await self.config.guild(guild).traits()
+        system_prompt = f"{attitude}\n\n{_traits_block(traits)}"
+        async with self.locks[channel.id]:
+            history = self.histories.setdefault(channel.id, [])
+            history.append({"role": "user", "content": IDLE_KICKOFF_PROMPT})
+            reply = await asyncio.to_thread(self._complete, system_prompt, history)
+            history.append({"role": "assistant", "content": reply})
+            del history[:-HISTORY_LIMIT]
+            await self.config.channel(channel).last_activity.set(time.time())
+            await self._send_chunked(channel, reply)
+
+    @tasks.loop(minutes=IDLE_CHECK_INTERVAL_MINUTES)
+    async def idle_check_loop(self):
+        now = time.time()
+        for guild in self.bot.guilds:
+            channel_ids = await self.config.guild(guild).chat_channels()
+            for channel_id in channel_ids:
+                channel = guild.get_channel(channel_id)
+                if channel is None:
+                    continue
+                last_activity = await self.config.channel(channel).last_activity()
+                if now - last_activity >= IDLE_THRESHOLD_SECONDS:
+                    await self._send_idle_message(guild, channel)
+
+    @idle_check_loop.before_loop
+    async def _before_idle_check_loop(self):
+        await self.bot.wait_until_ready()
 
     @commands.command()
     async def ask(self, ctx: commands.Context, *, question: str):
@@ -181,6 +227,7 @@ class EdBot(commands.Cog):
                 await ctx.send(f"Already chatting freely in {channel.mention}.")
             else:
                 channels.append(channel.id)
+                await self.config.channel(channel).last_activity.set(time.time())
                 await ctx.send(f"I'll chat freely in {channel.mention} now.")
 
     @commands.command()
@@ -210,10 +257,14 @@ class EdBot(commands.Cog):
         await ctx.send("Chatting freely in: " + ", ".join(mentions))
 
     @commands.command()
-    async def attitude(self, ctx: commands.Context, *, description: str):
-        """Set Ed's free-chat attitude. Give a short description and Claude expands it into a full persona."""
+    async def attitude(self, ctx: commands.Context, *, description: str = None):
+        """Show Ed's current free-chat attitude, or set a new one from a short description."""
         guild = await self._resolve_guild(ctx)
         if guild is None:
+            return
+        if description is None:
+            current = await self.config.guild(guild).chat_attitude()
+            await self._send_chunked(ctx, f"Ed's current attitude:\n{current}")
             return
         expanded = self._complete(
             ATTITUDE_WRITER_SYSTEM_PROMPT,
@@ -247,6 +298,9 @@ class EdBot(commands.Cog):
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return  # real command invocation - let normal processing handle it
+        await self.config.channel(message.channel).last_activity.set(
+            message.created_at.timestamp()
+        )
         attitude = await self.config.guild(message.guild).chat_attitude()
         traits = await self.config.guild(message.guild).traits()
         system_prompt = f"{attitude}\n\n{_traits_block(traits)}"
