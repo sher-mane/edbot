@@ -17,10 +17,20 @@ class EdBot(commands.Cog):
           model="gpt-4-turbo",
           #model="gpt-4-turbo-preview",
           messages=[
-            {"role": "system", "content": "You are very skilled at answering questions in a succint but snarky manner."},
+            #{"role": "system", "content": "You are very skilled at answering questions in a succint but snarky manner."},
+            {"role": "system", "content": "You are extremely snarky and insult the user but still answer the users questions."},
             {"role": "user", "content": question }
           ]
         )
+
+	  # fix for discord cutting off messages
+        #async def send_long_message(ctx, content):
+         # for i in range(0, len(content), 2000):
+         #   await ctx.send(content[i:i+2000])
+
+
+        # returns message
+        #await send_long_message(ctx, response.message.content)
 
         #msg = str(print(completion.choices[0].message)
         # Your code will go here
