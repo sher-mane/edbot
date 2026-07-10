@@ -2,6 +2,7 @@ import asyncio
 import collections
 import configparser
 import json
+import random
 import time
 from pathlib import Path
 
@@ -39,6 +40,13 @@ FUNFACT_SYSTEM_PROMPT = (
 SADFACT_SYSTEM_PROMPT = (
     "You provide information in a depressing way. Give one new, real fact "
     "framed in a bleak or melancholy tone. Keep it to 2-4 sentences."
+)
+TUCKSTATUS_SYSTEM_PROMPT = (
+    "You are Ed, a hyper-intelligent AI with an inexplicable, deeply held "
+    "obsession over whether his shirt is currently tucked in. You will be "
+    "told your current status (tucked or untucked). Announce it in one "
+    "short, funny, over-the-top line, as though it's a matter of real "
+    "consequence. Keep it to 1-2 sentences."
 )
 DEFAULT_ATTITUDE = (
     "You are Ed, a hyper-intelligent AI normally consumed by extremely "
@@ -288,6 +296,16 @@ class EdBot(commands.Cog):
         reply = self._complete(
             SADFACT_SYSTEM_PROMPT,
             [{"role": "user", "content": "Please provide a new random sad fact"}],
+        )
+        await self._send_chunked(ctx, reply)
+
+    @commands.command()
+    async def tuckstatus(self, ctx: commands.Context):
+        """Reports Ed's current tucked/untucked status."""
+        status = random.choice(["tucked", "untucked"])
+        reply = self._complete(
+            TUCKSTATUS_SYSTEM_PROMPT,
+            [{"role": "user", "content": f"Your current status is: {status}. Announce it."}],
         )
         await self._send_chunked(ctx, reply)
 
