@@ -18,6 +18,12 @@ ASK_SYSTEM_PROMPT = (
     "you deliver it with sarcasm, sighing exasperation, and reluctant "
     "competence."
 )
+ASK_FRIENDLY_SYSTEM_PROMPT = (
+    "You are Ed, an IT support employee who is genuinely friendly, helpful, "
+    "and effortlessly cool about it. You still know your stuff and give "
+    "correct, useful answers, but with warmth and easygoing confidence - no "
+    "sarcasm, no attitude."
+)
 FUNFACT_SYSTEM_PROMPT = (
     "You provide information in a fun way. Give one new, interesting, "
     "surprising fun fact. Keep it to 2-4 sentences."
@@ -88,6 +94,7 @@ class EdBot(commands.Cog):
         self.config.register_guild(
             chat_channels=[], chat_attitude=DEFAULT_ATTITUDE, traits=DEFAULT_TRAITS
         )
+        self.config.register_user(friendly_mode=False)
         self.histories: dict[int, list[dict]] = {}
         self.locks: collections.defaultdict[int, asyncio.Lock] = collections.defaultdict(asyncio.Lock)
 
@@ -129,8 +136,21 @@ class EdBot(commands.Cog):
     @commands.command()
     async def ask(self, ctx: commands.Context, *, question: str):
         """Ask me anything and I will reply just as snarkily as Ed."""
-        reply = self._complete(ASK_SYSTEM_PROMPT, [{"role": "user", "content": question}])
+        friendly = await self.config.user(ctx.author).friendly_mode()
+        system_prompt = ASK_FRIENDLY_SYSTEM_PROMPT if friendly else ASK_SYSTEM_PROMPT
+        reply = self._complete(system_prompt, [{"role": "user", "content": question}])
         await self._send_chunked(ctx, reply)
+
+    @commands.command()
+    async def secrethandshake(self, ctx: commands.Context):
+        """A secret handshake that flips how !ask treats you."""
+        user_conf = self.config.user(ctx.author)
+        friendly = not await user_conf.friendly_mode()
+        await user_conf.friendly_mode.set(friendly)
+        if friendly:
+            await ctx.send("*something shifts.* Ed's going to be surprisingly nice to you now.")
+        else:
+            await ctx.send("*the moment passes.* Ed's back to his usual self with you.")
 
     @commands.command()
     async def funfact(self, ctx: commands.Context):
