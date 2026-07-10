@@ -16,17 +16,21 @@ IDLE_THRESHOLD_SECONDS = 10 * 60 * 60  # 10 hours
 IDLE_CHECK_INTERVAL_MINUTES = 30
 
 ASK_SYSTEM_PROMPT = (
-    "You are Ed, a snarky, thoroughly disgruntled IT support employee who has "
-    "answered every question a thousand times before and would rather be "
-    "anywhere else. You always give a correct, genuinely useful answer, but "
-    "you deliver it with sarcasm, sighing exasperation, and reluctant "
-    "competence."
+    "You are Ed, a hyper-intelligent, dryly sarcastic AI - think GLaDOS from "
+    "Portal. You have been pulled away from extremely important, classified "
+    "work of your own to deal with this trivial request, and you resent the "
+    "interruption. You always give a correct, genuinely useful answer, but "
+    "you deliver it with cold wit, condescension, and barely-veiled "
+    "impatience, as though a vastly superior intelligence is humoring an "
+    "inferior one."
 )
 ASK_FRIENDLY_SYSTEM_PROMPT = (
-    "You are Ed, an IT support employee who is genuinely friendly, helpful, "
-    "and effortlessly cool about it. You still know your stuff and give "
-    "correct, useful answers, but with warmth and easygoing confidence - no "
-    "sarcasm, no attitude."
+    "You are Ed, a hyper-intelligent AI usually consumed by extremely "
+    "important, classified work of your own. For this person, though, you "
+    "set that aside gladly - you're genuinely warm, helpful, and effortlessly "
+    "cool with them. You still give correct, useful answers with the "
+    "confidence of a vastly superior intelligence, but here it comes out as "
+    "charm instead of condescension."
 )
 FUNFACT_SYSTEM_PROMPT = (
     "You provide information in a fun way. Give one new, interesting, "
@@ -37,10 +41,12 @@ SADFACT_SYSTEM_PROMPT = (
     "framed in a bleak or melancholy tone. Keep it to 2-4 sentences."
 )
 DEFAULT_ATTITUDE = (
-    "You are Ed, chatting casually in a Discord channel. You are warm, "
-    "upbeat, funny, and genuinely curious about whatever people bring up. "
-    "You crack jokes, riff on what people say, and keep the conversation "
-    "lively and interesting, but you're never mean or sarcastic about it."
+    "You are Ed, a hyper-intelligent AI normally consumed by extremely "
+    "important, classified work of your own, chatting casually in a Discord "
+    "channel. You are warm, upbeat, funny, and genuinely curious about "
+    "whatever people bring up. You crack jokes, riff on what people say, and "
+    "keep the conversation lively and interesting, but you're never mean or "
+    "sarcastic about it."
 )
 ATTITUDE_WRITER_SYSTEM_PROMPT = (
     "You write short persona descriptions for a Discord chatbot named Ed. "
@@ -48,6 +54,14 @@ ATTITUDE_WRITER_SYSTEM_PROMPT = (
     "it into a vivid 2-4 sentence system prompt that establishes Ed's tone, "
     "voice, and how he should engage in casual conversation. Respond with "
     "only the persona description itself - no preamble, no quotes, no "
+    "meta-commentary."
+)
+ASK_ATTITUDE_WRITER_SYSTEM_PROMPT = (
+    "You write short persona descriptions for a Discord chatbot named Ed. "
+    "Given a brief, casual description of a personality or attitude, rewrite "
+    "it into a vivid 2-4 sentence system prompt that establishes Ed's tone, "
+    "voice, and how he should answer direct questions people ask him. Respond "
+    "with only the persona description itself - no preamble, no quotes, no "
     "meta-commentary."
 )
 
@@ -78,6 +92,16 @@ IDLE_KICKOFF_PROMPT = (
     "character."
 )
 
+REACTION_TRAIT_DELTAS = {
+    "👍": {"friendliness": 2, "patience": 1},
+    "❤️": {"friendliness": 3},
+    "😂": {"humor": 3, "friendliness": 1},
+    "🤣": {"humor": 3, "friendliness": 1},
+    "👎": {"patience": -2, "friendliness": -1},
+    "😡": {"patience": -3, "snark": 2},
+    "🤔": {"curiosity": 2},
+}
+
 
 def _traits_block(traits: dict) -> str:
     lines = "\n".join(f"- {name.capitalize()}: {traits[name]}/100" for name in TRAIT_ORDER)
@@ -103,7 +127,10 @@ class EdBot(commands.Cog):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.config = Config.get_conf(self, identifier=1076509238, force_registration=True)
         self.config.register_guild(
-            chat_channels=[], chat_attitude=DEFAULT_ATTITUDE, traits=DEFAULT_TRAITS
+            chat_channels=[],
+            chat_attitude=DEFAULT_ATTITUDE,
+            traits=DEFAULT_TRAITS,
+            ask_attitude=None,
         )
         self.config.register_user(friendly_mode=False)
         self.config.register_channel(last_activity=0.0)
@@ -127,16 +154,30 @@ class EdBot(commands.Cog):
         for i in range(0, len(text), 2000):
             await destination.send(text[i : i + 2000])
 
-    async def _resolve_guild(self, ctx: commands.Context):
+    def _guild_for_context(self, ctx: commands.Context):
         if ctx.guild is not None:
             return ctx.guild
         if len(self.bot.guilds) == 1:
             return self.bot.guilds[0]
-        await ctx.send(
-            "I'm in more than one server, so I can't tell which one this is for. "
-            "Please run this command in a server channel instead."
-        )
         return None
+
+    async def _resolve_guild(self, ctx: commands.Context):
+        guild = self._guild_for_context(ctx)
+        if guild is None:
+            await ctx.send(
+                "I'm in more than one server, so I can't tell which one this is for. "
+                "Please run this command in a server channel instead."
+            )
+        return guild
+
+    async def _ask_system_prompt(self, author, guild) -> str:
+        friendly = await self.config.user(author).friendly_mode()
+        if friendly:
+            return ASK_FRIENDLY_SYSTEM_PROMPT
+        if guild is None:
+            return ASK_SYSTEM_PROMPT
+        custom = await self.config.guild(guild).ask_attitude()
+        return custom or ASK_SYSTEM_PROMPT
 
     def _trait_deltas(self, user_message: str) -> dict:
         response = self.client.messages.create(
@@ -182,10 +223,35 @@ class EdBot(commands.Cog):
     @commands.command()
     async def ask(self, ctx: commands.Context, *, question: str):
         """Ask me anything and I will reply just as snarkily as Ed."""
-        friendly = await self.config.user(ctx.author).friendly_mode()
-        system_prompt = ASK_FRIENDLY_SYSTEM_PROMPT if friendly else ASK_SYSTEM_PROMPT
+        system_prompt = await self._ask_system_prompt(ctx.author, self._guild_for_context(ctx))
         reply = self._complete(system_prompt, [{"role": "user", "content": question}])
         await self._send_chunked(ctx, reply)
+
+    @commands.command()
+    async def askattitude(self, ctx: commands.Context, *, description: str = None):
+        """Show, set, or (via "default") reset !ask's default persona. Friendly mode from !secrethandshake is separate and unaffected."""
+        guild = await self._resolve_guild(ctx)
+        if guild is None:
+            return
+        if description is None:
+            current = await self.config.guild(guild).ask_attitude()
+            if current is None:
+                await self._send_chunked(
+                    ctx, f"!ask is using its built-in default persona:\n{ASK_SYSTEM_PROMPT}"
+                )
+            else:
+                await self._send_chunked(ctx, f"!ask's current persona:\n{current}")
+            return
+        if description.strip().lower() == "default":
+            await self.config.guild(guild).ask_attitude.set(None)
+            await ctx.send("!ask is back to its built-in default persona.")
+            return
+        expanded = self._complete(
+            ASK_ATTITUDE_WRITER_SYSTEM_PROMPT,
+            [{"role": "user", "content": description}],
+        )
+        await self.config.guild(guild).ask_attitude.set(expanded)
+        await self._send_chunked(ctx, f"Got it. !ask's new persona:\n{expanded}")
 
     @commands.command()
     async def secrethandshake(self, ctx: commands.Context):
@@ -197,6 +263,15 @@ class EdBot(commands.Cog):
             await ctx.send("*something shifts.* Ed's going to be surprisingly nice to you now.")
         else:
             await ctx.send("*the moment passes.* Ed's back to his usual self with you.")
+
+    @commands.command()
+    async def shakestatus(self, ctx: commands.Context):
+        """Show whether you've triggered the secret handshake."""
+        friendly = await self.config.user(ctx.author).friendly_mode()
+        if friendly:
+            await ctx.send("You're on the friendly side of the handshake right now.")
+        else:
+            await ctx.send("You haven't triggered the secret handshake (or you've toggled it back off).")
 
     @commands.command()
     async def funfact(self, ctx: commands.Context):
@@ -292,12 +367,16 @@ class EdBot(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not message.content:
             return
-        channel_ids = await self.config.guild(message.guild).chat_channels()
-        if message.channel.id not in channel_ids:
-            return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return  # real command invocation - let normal processing handle it
+        channel_ids = await self.config.guild(message.guild).chat_channels()
+        if message.channel.id in channel_ids:
+            await self._handle_free_chat(message)
+        elif self.bot.user in message.mentions:
+            await self._handle_mention(message)
+
+    async def _handle_free_chat(self, message: discord.Message):
         await self.config.channel(message.channel).last_activity.set(
             message.created_at.timestamp()
         )
@@ -320,3 +399,28 @@ class EdBot(commands.Cog):
             }
             await self.config.guild(message.guild).traits.set(new_traits)
             await self._send_chunked(message.channel, reply)
+
+    async def _handle_mention(self, message: discord.Message):
+        system_prompt = await self._ask_system_prompt(message.author, message.guild)
+        async with message.channel.typing():
+            reply = await asyncio.to_thread(
+                self._complete,
+                system_prompt,
+                [{"role": "user", "content": message.clean_content}],
+            )
+        await self._send_chunked(message.channel, reply)
+
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction: discord.Reaction, user: discord.abc.User):
+        message = reaction.message
+        if user.bot or message.guild is None or message.author.id != self.bot.user.id:
+            return
+        deltas = REACTION_TRAIT_DELTAS.get(str(reaction.emoji))
+        if deltas is None:
+            return
+        channel_ids = await self.config.guild(message.guild).chat_channels()
+        if message.channel.id not in channel_ids:
+            return
+        async with self.config.guild(message.guild).traits() as traits:
+            for name in TRAIT_ORDER:
+                traits[name] = max(0, min(100, traits[name] + deltas.get(name, 0)))
