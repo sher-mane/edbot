@@ -86,7 +86,7 @@ class EdBot(commands.Cog):
         self.client = anthropic.Anthropic(api_key=api_key)
         self.config = Config.get_conf(self, identifier=1076509238, force_registration=True)
         self.config.register_guild(
-            chat_channel=None, chat_attitude=DEFAULT_ATTITUDE, traits=DEFAULT_TRAITS
+            chat_channels=[], chat_attitude=DEFAULT_ATTITUDE, traits=DEFAULT_TRAITS
         )
         self.histories: dict[int, list[dict]] = {}
         self.locks: collections.defaultdict[int, asyncio.Lock] = collections.defaultdict(asyncio.Lock)
@@ -151,17 +151,43 @@ class EdBot(commands.Cog):
         await self._send_chunked(ctx, reply)
 
     @commands.command()
-    async def edbotchannel(self, ctx: commands.Context, channel: discord.TextChannel = None):
-        """Set (or clear, if called with no channel) the channel Ed chats freely in."""
+    async def edbotaddchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Add a channel Ed chats freely in."""
         guild = await self._resolve_guild(ctx)
         if guild is None:
             return
-        if channel is None:
-            await self.config.guild(guild).chat_channel.clear()
-            await ctx.send("Free chat is now off.")
-        else:
-            await self.config.guild(guild).chat_channel.set(channel.id)
-            await ctx.send(f"I'll chat freely in {channel.mention} now.")
+        async with self.config.guild(guild).chat_channels() as channels:
+            if channel.id in channels:
+                await ctx.send(f"Already chatting freely in {channel.mention}.")
+            else:
+                channels.append(channel.id)
+                await ctx.send(f"I'll chat freely in {channel.mention} now.")
+
+    @commands.command()
+    async def edbotremovechannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Remove a channel from Ed's free-chat list."""
+        guild = await self._resolve_guild(ctx)
+        if guild is None:
+            return
+        async with self.config.guild(guild).chat_channels() as channels:
+            if channel.id not in channels:
+                await ctx.send(f"I wasn't chatting freely in {channel.mention}.")
+            else:
+                channels.remove(channel.id)
+                await ctx.send(f"Free chat is now off in {channel.mention}.")
+
+    @commands.command()
+    async def edbotlistchannels(self, ctx: commands.Context):
+        """List the channels Ed currently chats freely in."""
+        guild = await self._resolve_guild(ctx)
+        if guild is None:
+            return
+        channels = await self.config.guild(guild).chat_channels()
+        if not channels:
+            await ctx.send("I'm not set to chat freely in any channel right now.")
+            return
+        mentions = [f"<#{cid}>" for cid in channels]
+        await ctx.send("Chatting freely in: " + ", ".join(mentions))
 
     @commands.command()
     async def attitude(self, ctx: commands.Context, *, description: str):
@@ -195,8 +221,8 @@ class EdBot(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not message.content:
             return
-        channel_id = await self.config.guild(message.guild).chat_channel()
-        if channel_id != message.channel.id:
+        channel_ids = await self.config.guild(message.guild).chat_channels()
+        if message.channel.id not in channel_ids:
             return
         ctx = await self.bot.get_context(message)
         if ctx.valid:
