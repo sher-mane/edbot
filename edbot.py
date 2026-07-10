@@ -4,9 +4,12 @@ import collections
 import configparser
 import json
 import random
+import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
+import aiohttp
 import anthropic
 import discord
 from discord.ext import tasks
@@ -20,6 +23,12 @@ MAX_LORE = 40
 MAX_USER_MEMORY = 20
 MAX_TRAIT_HISTORY = 30
 MAX_IMAGES_PER_MESSAGE = 3
+
+URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+SHARE_LINK_DOMAINS = ("tenor.com", "giphy.com", "media.tenor.com", "media.giphy.com", "imgur.com", "i.imgur.com")
+OG_IMAGE_TAG_PATTERN = re.compile(r'<meta\s+[^>]*property=["\']og:image["\'][^>]*>', re.IGNORECASE)
+CONTENT_ATTR_PATTERN = re.compile(r'content=["\']([^"\']+)["\']', re.IGNORECASE)
 
 ASK_SYSTEM_PROMPT = (
     "You are Ed, a hyper-intelligent, dryly sarcastic AI - think GLaDOS from "
@@ -183,6 +192,28 @@ def _build_user_content(text, image_blocks: list):
     return content
 
 
+def _classify_urls(text: str):
+    """Return (direct_image_urls, share_link_urls) found in text."""
+    direct, share = [], []
+    for match in URL_PATTERN.findall(text or ""):
+        url = match.rstrip(").,!?>\"'")
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        if parsed.path.lower().endswith(IMAGE_EXTENSIONS):
+            direct.append(url)
+        elif any(host == d or host.endswith("." + d) for d in SHARE_LINK_DOMAINS):
+            share.append(url)
+    return direct, share
+
+
+def _extract_og_image(html: str):
+    tag = OG_IMAGE_TAG_PATTERN.search(html)
+    if not tag:
+        return None
+    content = CONTENT_ATTR_PATTERN.search(tag.group(0))
+    return content.group(1) if content else None
+
+
 def _load_api_key(conf_path: Path) -> str:
     parser = configparser.ConfigParser()
     parser.read_string("[DEFAULT]\n" + conf_path.read_text())
@@ -311,11 +342,22 @@ class EdBot(commands.Cog):
             history.append(dict(traits))
             del history[:-MAX_TRAIT_HISTORY]
 
-    async def _image_content_blocks(self, attachments) -> list:
+    async def _resolve_share_link(self, url: str):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status != 200:
+                        return None
+                    html = await resp.text(errors="ignore")
+        except aiohttp.ClientError:
+            return None
+        return _extract_og_image(html)
+
+    async def _image_content_blocks(self, attachments, text: str = "") -> list:
         blocks = []
         for attachment in attachments:
             if len(blocks) >= MAX_IMAGES_PER_MESSAGE:
-                break
+                return blocks
             if not attachment.content_type or not attachment.content_type.startswith("image/"):
                 continue
             data = await attachment.read()
@@ -324,6 +366,19 @@ class EdBot(commands.Cog):
                 "type": "image",
                 "source": {"type": "base64", "media_type": attachment.content_type, "data": encoded},
             })
+        if len(blocks) >= MAX_IMAGES_PER_MESSAGE:
+            return blocks
+        direct_urls, share_urls = _classify_urls(text)
+        for url in direct_urls:
+            if len(blocks) >= MAX_IMAGES_PER_MESSAGE:
+                return blocks
+            blocks.append({"type": "image", "source": {"type": "url", "url": url}})
+        for url in share_urls:
+            if len(blocks) >= MAX_IMAGES_PER_MESSAGE:
+                return blocks
+            resolved = await self._resolve_share_link(url)
+            if resolved:
+                blocks.append({"type": "image", "source": {"type": "url", "url": resolved}})
         return blocks
 
     async def _send_idle_message(self, guild: discord.Guild, channel: discord.TextChannel):
@@ -363,7 +418,7 @@ class EdBot(commands.Cog):
     @commands.command()
     async def ask(self, ctx: commands.Context, *, question: str = None):
         """Ask me anything (optionally attach an image) and I will reply just as snarkily as Ed."""
-        image_blocks = await self._image_content_blocks(ctx.message.attachments)
+        image_blocks = await self._image_content_blocks(ctx.message.attachments, question or "")
         if not question and not image_blocks:
             await ctx.send("Ask me something, or attach an image.")
             return
@@ -627,7 +682,7 @@ class EdBot(commands.Cog):
         system_prompt = f"{attitude}\n\n{_traits_block(traits)}"
         if lore:
             system_prompt += "\n\n" + _lore_block(lore)
-        image_blocks = await self._image_content_blocks(message.attachments)
+        image_blocks = await self._image_content_blocks(message.attachments, message.content)
         user_content = _build_user_content(message.content, image_blocks)
         async with self.locks[message.channel.id]:
             history = self.histories.setdefault(message.channel.id, [])
@@ -664,7 +719,7 @@ class EdBot(commands.Cog):
     async def _handle_mention(self, message: discord.Message):
         member = message.author
         system_prompt = await self._ask_system_prompt(member, message.guild, member=member)
-        image_blocks = await self._image_content_blocks(message.attachments)
+        image_blocks = await self._image_content_blocks(message.attachments, message.content)
         user_content = _build_user_content(message.clean_content, image_blocks)
         async with message.channel.typing():
             if message.content:
