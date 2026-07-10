@@ -1,6 +1,7 @@
 import asyncio
 import collections
 import configparser
+import json
 from pathlib import Path
 
 import anthropic
@@ -40,6 +41,35 @@ ATTITUDE_WRITER_SYSTEM_PROMPT = (
     "meta-commentary."
 )
 
+TRAIT_ORDER = ["friendliness", "humor", "snark", "curiosity", "patience"]
+DEFAULT_TRAITS = {name: 50 for name in TRAIT_ORDER}
+TRAIT_DELTA_SCHEMA = {
+    "type": "object",
+    "properties": {name: {"type": "integer"} for name in TRAIT_ORDER},
+    "required": TRAIT_ORDER,
+    "additionalProperties": False,
+}
+TRAIT_ANALYST_SYSTEM_PROMPT = (
+    "You analyze a single Discord chat message and decide how it should nudge "
+    "a chatbot's personality traits. For each trait, return an integer from -3 "
+    "to 3: positive to increase it, negative to decrease it, 0 for no change. "
+    "friendliness: warmth/kindness of the message toward the bot. humor: how "
+    "playful or joke-filled the message is. snark: whether the message invites "
+    "or rewards sarcasm (e.g. rudeness, insults raise this). curiosity: how "
+    "much the message asks deep/interesting questions worth engaging with. "
+    "patience: lower this for rude, repetitive, or demanding messages; raise "
+    "it for polite, easygoing ones."
+)
+
+
+def _traits_block(traits: dict) -> str:
+    lines = "\n".join(f"- {name.capitalize()}: {traits[name]}/100" for name in TRAIT_ORDER)
+    return (
+        "Ed's current personality levels (0 = very low, 100 = very high), "
+        "shaped by how people have treated him recently:\n" + lines +
+        "\nLet these levels genuinely color your tone and word choice."
+    )
+
 
 def _load_api_key(conf_path: Path) -> str:
     parser = configparser.ConfigParser()
@@ -55,7 +85,9 @@ class EdBot(commands.Cog):
         api_key = _load_api_key(Path(__file__).parent / "edbot.conf")
         self.client = anthropic.Anthropic(api_key=api_key)
         self.config = Config.get_conf(self, identifier=1076509238, force_registration=True)
-        self.config.register_guild(chat_channel=None, chat_attitude=DEFAULT_ATTITUDE)
+        self.config.register_guild(
+            chat_channel=None, chat_attitude=DEFAULT_ATTITUDE, traits=DEFAULT_TRAITS
+        )
         self.histories: dict[int, list[dict]] = {}
         self.locks: collections.defaultdict[int, asyncio.Lock] = collections.defaultdict(asyncio.Lock)
 
@@ -71,6 +103,17 @@ class EdBot(commands.Cog):
     async def _send_chunked(self, destination, text: str):
         for i in range(0, len(text), 2000):
             await destination.send(text[i : i + 2000])
+
+    def _trait_deltas(self, user_message: str) -> dict:
+        response = self.client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=256,
+            system=TRAIT_ANALYST_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_message}],
+            output_config={"format": {"type": "json_schema", "schema": TRAIT_DELTA_SCHEMA}},
+        )
+        text = next(block.text for block in response.content if block.type == "text")
+        return json.loads(text)
 
     @commands.command()
     async def ask(self, ctx: commands.Context, *, question: str):
@@ -118,7 +161,26 @@ class EdBot(commands.Cog):
             [{"role": "user", "content": description}],
         )
         await self.config.guild(ctx.guild).chat_attitude.set(expanded)
+        await self.config.guild(ctx.guild).traits.set(dict(DEFAULT_TRAITS))
         await self._send_chunked(ctx, f"Got it. New attitude:\n{expanded}")
+
+    @commands.command()
+    @commands.guild_only()
+    async def edbotpersonality(self, ctx: commands.Context, action: str = None):
+        """Show Ed's current evolving personality levels. Admins can pass "reset" to reset them."""
+        if action and action.lower() == "reset":
+            is_admin = ctx.author.guild_permissions.manage_guild or await self.bot.is_admin(
+                ctx.author
+            ) or await self.bot.is_owner(ctx.author)
+            if not is_admin:
+                await ctx.send("You don't have permission to reset that.")
+                return
+            await self.config.guild(ctx.guild).traits.set(dict(DEFAULT_TRAITS))
+            await ctx.send("Ed's personality has been reset to neutral.")
+            return
+        traits = await self.config.guild(ctx.guild).traits()
+        lines = "\n".join(f"{name.capitalize()}: {traits[name]}/100" for name in TRAIT_ORDER)
+        await ctx.send(f"Ed's current personality:\n{lines}")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -131,11 +193,21 @@ class EdBot(commands.Cog):
         if ctx.valid:
             return  # real command invocation - let normal processing handle it
         attitude = await self.config.guild(message.guild).chat_attitude()
+        traits = await self.config.guild(message.guild).traits()
+        system_prompt = f"{attitude}\n\n{_traits_block(traits)}"
         async with self.locks[message.channel.id]:
             history = self.histories.setdefault(message.channel.id, [])
             history.append({"role": "user", "content": message.content})
             async with message.channel.typing():
-                reply = await asyncio.to_thread(self._complete, attitude, history)
+                reply, deltas = await asyncio.gather(
+                    asyncio.to_thread(self._complete, system_prompt, history),
+                    asyncio.to_thread(self._trait_deltas, message.content),
+                )
             history.append({"role": "assistant", "content": reply})
             del history[:-HISTORY_LIMIT]
+            new_traits = {
+                name: max(0, min(100, traits[name] + max(-3, min(3, int(deltas.get(name, 0))))))
+                for name in TRAIT_ORDER
+            }
+            await self.config.guild(message.guild).traits.set(new_traits)
             await self._send_chunked(message.channel, reply)
