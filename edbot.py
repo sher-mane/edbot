@@ -140,7 +140,6 @@ class EdBot(commands.Cog):
         await self._send_chunked(ctx, reply)
 
     @commands.command()
-    @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def edbotchannel(self, ctx: commands.Context, channel: discord.TextChannel = None):
         """Set (or clear, if called with no channel) the channel Ed chats freely in."""
@@ -152,7 +151,6 @@ class EdBot(commands.Cog):
             await ctx.send(f"I'll chat freely in {channel.mention} now.")
 
     @commands.command()
-    @commands.admin_or_permissions(manage_guild=True)
     @commands.guild_only()
     async def attitude(self, ctx: commands.Context, *, description: str):
         """Set Ed's free-chat attitude. Give a short description and Claude expands it into a full persona."""
@@ -167,14 +165,8 @@ class EdBot(commands.Cog):
     @commands.command()
     @commands.guild_only()
     async def edbotpersonality(self, ctx: commands.Context, action: str = None):
-        """Show Ed's current evolving personality levels. Admins can pass "reset" to reset them."""
+        """Show Ed's current evolving personality levels. Pass "reset" to reset them."""
         if action and action.lower() == "reset":
-            is_admin = ctx.author.guild_permissions.manage_guild or await self.bot.is_admin(
-                ctx.author
-            ) or await self.bot.is_owner(ctx.author)
-            if not is_admin:
-                await ctx.send("You don't have permission to reset that.")
-                return
             await self.config.guild(ctx.guild).traits.set(dict(DEFAULT_TRAITS))
             await ctx.send("Ed's personality has been reset to neutral.")
             return
