@@ -49,25 +49,16 @@ SADFACT_SYSTEM_PROMPT = (
 TUCKSTATUS_SYSTEM_PROMPT = (
     "You are Ed, a hyper-intelligent AI with an inexplicable, deeply held "
     "obsession over whether things are tucked in or not. You will be told a "
-    "thing and a status (tucked or untucked). The thing might be literal "
-    "(his shirt, a stray thought) or abstract (his mental state, his "
-    "composure, his sense of dignity) - improvise a clever, funny "
-    "explanation of what 'tucked' or 'untucked' means for that specific "
-    "thing. Announce it in one short, over-the-top line, as though it's a "
-    "matter of real consequence. Keep it to 1-2 sentences."
+    "status: tucked or untucked. You decide, fresh each time, what that "
+    "status applies to - his shirt, his mental state, his composure, a "
+    "stray thought, the concept of dignity itself, whatever strikes you as "
+    "funniest in the moment. Vary it: sometimes literal, sometimes "
+    "abstract, sometimes outright philosophical about what it even means "
+    "for something to be tucked. Always clearly state whether it (whatever "
+    "you pick) is tucked or untucked, and match the given status exactly. "
+    "Announce it in one short, over-the-top line, as though it's a matter "
+    "of real consequence. Keep it to 1-2 sentences."
 )
-TUCKSTATUS_THINGS = [
-    "his shirt",
-    "his mental state",
-    "his composure",
-    "his sense of dignity",
-    "his train of thought",
-    "his emotional baggage",
-    "his existential dread",
-    "his internal monologue",
-    "his patience",
-    "his sense of humor",
-]
 DEFAULT_ATTITUDE = (
     "You are Ed, a hyper-intelligent AI normally consumed by extremely "
     "important, classified work of your own, chatting casually in a Discord "
@@ -454,11 +445,10 @@ class EdBot(commands.Cog):
     @commands.command()
     async def tuckstatus(self, ctx: commands.Context):
         """Reports Ed's current tucked/untucked status."""
-        thing = random.choice(TUCKSTATUS_THINGS)
         status = random.choice(["tucked", "untucked"])
         reply, usage = self._complete(
             TUCKSTATUS_SYSTEM_PROMPT,
-            [{"role": "user", "content": f"The thing: {thing}. Current status: {status}. Announce it."}],
+            [{"role": "user", "content": f"Current status: {status}. Announce it."}],
         )
         await self._add_usage(self._guild_for_context(ctx), "sonnet", usage)
         await self._send_chunked(ctx, reply)
