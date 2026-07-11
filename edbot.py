@@ -743,6 +743,8 @@ class EdBot(commands.Cog):
         analysis, usage = await asyncio.to_thread(self._analyze_message, message.content)
         if analysis["user_fact_note"]:
             await self._add_user_fact(message.author, analysis["user_fact_note"])
+        if analysis["lore_note"]:
+            await self._add_lore(message.guild, analysis["lore_note"])
         await self._add_usage(message.guild, "haiku", usage)
 
     async def _handle_free_chat(self, message: discord.Message):
