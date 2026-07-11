@@ -247,6 +247,7 @@ class EdBot(commands.Cog):
         self.config = Config.get_conf(self, identifier=1076509238, force_registration=True)
         self.config.register_guild(
             chat_channels=[],
+            lurk_channels=[],
             chat_attitude=DEFAULT_ATTITUDE,
             traits=DEFAULT_TRAITS,
             ask_attitude=None,
@@ -569,6 +570,45 @@ class EdBot(commands.Cog):
         await ctx.send("Chatting freely in: " + ", ".join(mentions))
 
     @commands.command()
+    async def edbotaddlurkchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Add a channel Ed silently lurks in - he'll learn about users there but never free-chat."""
+        guild = await self._resolve_guild(ctx)
+        if guild is None:
+            return
+        async with self.config.guild(guild).lurk_channels() as channels:
+            if channel.id in channels:
+                await ctx.send(f"Already lurking in {channel.mention}.")
+            else:
+                channels.append(channel.id)
+                await ctx.send(f"I'll quietly pick up on things in {channel.mention} without chiming in.")
+
+    @commands.command()
+    async def edbotremovelurkchannel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Stop lurking in a channel."""
+        guild = await self._resolve_guild(ctx)
+        if guild is None:
+            return
+        async with self.config.guild(guild).lurk_channels() as channels:
+            if channel.id not in channels:
+                await ctx.send(f"I wasn't lurking in {channel.mention}.")
+            else:
+                channels.remove(channel.id)
+                await ctx.send(f"No longer lurking in {channel.mention}.")
+
+    @commands.command()
+    async def edbotlistlurkchannels(self, ctx: commands.Context):
+        """List the channels Ed is silently lurking in."""
+        guild = await self._resolve_guild(ctx)
+        if guild is None:
+            return
+        channels = await self.config.guild(guild).lurk_channels()
+        if not channels:
+            await ctx.send("I'm not lurking in any channel right now.")
+            return
+        mentions = [f"<#{cid}>" for cid in channels]
+        await ctx.send("Lurking in: " + ", ".join(mentions))
+
+    @commands.command()
     async def attitude(self, ctx: commands.Context, *, description: str = None):
         """Show Ed's current free-chat attitude, or set a new one from a short description."""
         guild = await self._resolve_guild(ctx)
@@ -686,11 +726,24 @@ class EdBot(commands.Cog):
         ctx = await self.bot.get_context(message)
         if ctx.valid:
             return  # real command invocation - let normal processing handle it
+        lurk_channel_ids = await self.config.guild(message.guild).lurk_channels()
+        if self.bot.user in message.mentions:
+            await self._handle_mention(message)
+            return
+        if message.channel.id in lurk_channel_ids:
+            await self._handle_lurk(message)
+            return
         channel_ids = await self.config.guild(message.guild).chat_channels()
         if message.channel.id in channel_ids:
             await self._handle_free_chat(message)
-        elif self.bot.user in message.mentions:
-            await self._handle_mention(message)
+
+    async def _handle_lurk(self, message: discord.Message):
+        if not message.content:
+            return
+        analysis, usage = await asyncio.to_thread(self._analyze_message, message.content)
+        if analysis["user_fact_note"]:
+            await self._add_user_fact(message.author, analysis["user_fact_note"])
+        await self._add_usage(message.guild, "haiku", usage)
 
     async def _handle_free_chat(self, message: discord.Message):
         await self.config.channel(message.channel).last_activity.set(
