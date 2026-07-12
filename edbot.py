@@ -20,9 +20,10 @@ HISTORY_LIMIT = 20  # ~10 user/assistant turns kept per channel
 IDLE_THRESHOLD_SECONDS = 10 * 60 * 60  # 10 hours
 IDLE_CHECK_INTERVAL_MINUTES = 30
 MAX_LORE = 40
-MAX_USER_MEMORY = 20
+MAX_USER_MEMORY = 100
 MAX_TRAIT_HISTORY = 30
 MAX_IMAGES_PER_MESSAGE = 3
+MAX_REFERENCED_USER_FACTS = 5  # facts pulled in per @mentioned user, to keep the prompt lean
 STATEMENT_REPLY_CHANCE = 0.35  # chance Ed weighs in on a non-question message
 
 URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -715,7 +716,26 @@ class EdBot(commands.Cog):
         if not facts:
             await ctx.send("I don't have anything memorable on file about you yet.")
             return
-        await self._send_chunked(ctx, "Here's what I remember about you:\n" + "\n".join(f"- {f}" for f in facts))
+        sample = random.sample(facts, min(8, len(facts)))
+        await self._send_chunked(ctx, "Here's some of what I remember about you:\n" + "\n".join(f"- {f}" for f in sample))
+
+    @commands.command()
+    async def edbotlistusers(self, ctx: commands.Context):
+        """List everyone Ed has facts saved about in this server."""
+        guild = await self._resolve_guild(ctx)
+        if guild is None:
+            return
+        all_members = await self.config.all_members(guild)
+        names = []
+        for member_id, data in all_members.items():
+            if not data.get("memory"):
+                continue
+            member = guild.get_member(member_id)
+            names.append(member.display_name if member else f"(former member, ID {member_id})")
+        if not names:
+            await ctx.send("I don't have anything memorable on file about anyone here yet.")
+            return
+        await self._send_chunked(ctx, "I've got notes on:\n" + "\n".join(f"- {n}" for n in sorted(names)))
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -756,17 +776,37 @@ class EdBot(commands.Cog):
             system_prompt += "\n\n" + _lore_block(lore)
         return system_prompt
 
+    async def _referenced_facts_block(self, message: discord.Message) -> str:
+        lines = []
+        seen = set()
+        for member in message.mentions:
+            if member.bot or member.id == message.author.id or member.id in seen:
+                continue
+            seen.add(member.id)
+            facts = await self.config.member(member).memory()
+            if not facts:
+                continue
+            sample = random.sample(facts, min(MAX_REFERENCED_USER_FACTS, len(facts)))
+            lines.append(f"- {member.display_name}: " + "; ".join(sample))
+        if not lines:
+            return ""
+        return "Known facts about other people mentioned in this message:\n" + "\n".join(lines)
+
     async def _handle_free_chat(self, message: discord.Message):
         await self.config.channel(message.channel).last_activity.set(
             message.created_at.timestamp()
         )
         traits = await self.config.guild(message.guild).traits()
         system_prompt = await self._free_chat_system_prompt(message.guild)
-        image_blocks = await self._image_content_blocks(message.attachments, message.content)
-        user_content = _build_user_content(message.content, image_blocks)
+        referenced = await self._referenced_facts_block(message)
+        if referenced:
+            system_prompt += "\n\n" + referenced
+        content = message.clean_content
+        image_blocks = await self._image_content_blocks(message.attachments, content)
+        user_content = _build_user_content(content, image_blocks)
         should_reply = (
             bool(image_blocks)
-            or _looks_like_question(message.content)
+            or _looks_like_question(content)
             or random.random() < STATEMENT_REPLY_CHANCE
         )
         async with self.locks[message.channel.id]:
@@ -775,18 +815,18 @@ class EdBot(commands.Cog):
             analysis = analysis_usage = reply = reply_usage = None
             if should_reply:
                 async with message.channel.typing():
-                    if message.content:
+                    if content:
                         (reply, reply_usage), (analysis, analysis_usage) = await asyncio.gather(
                             asyncio.to_thread(self._complete, system_prompt, history),
-                            asyncio.to_thread(self._analyze_message, message.content),
+                            asyncio.to_thread(self._analyze_message, content),
                         )
                     else:
                         reply, reply_usage = await asyncio.to_thread(self._complete, system_prompt, history)
                 history.append({"role": "assistant", "content": reply})
                 if image_blocks:
-                    history[-2]["content"] = message.content or "[image attached]"
-            elif message.content:
-                analysis, analysis_usage = await asyncio.to_thread(self._analyze_message, message.content)
+                    history[-2]["content"] = content or "[image attached]"
+            elif content:
+                analysis, analysis_usage = await asyncio.to_thread(self._analyze_message, content)
             del history[:-HISTORY_LIMIT]
             if analysis is not None:
                 deltas = analysis["trait_deltas"]
@@ -812,6 +852,9 @@ class EdBot(commands.Cog):
             system_prompt = await self._free_chat_system_prompt(message.guild)
         else:
             system_prompt = await self._ask_system_prompt(member, message.guild, member=member)
+        referenced = await self._referenced_facts_block(message)
+        if referenced:
+            system_prompt += "\n\n" + referenced
         image_blocks = await self._image_content_blocks(message.attachments, message.content)
         user_content = _build_user_content(message.clean_content, image_blocks)
         async with message.channel.typing():
