@@ -25,6 +25,7 @@ MAX_TRAIT_HISTORY = 30
 MAX_IMAGES_PER_MESSAGE = 3
 MAX_REFERENCED_USER_FACTS = 5  # facts pulled in per @mentioned user, to keep the prompt lean
 STATEMENT_REPLY_CHANCE = 0.35  # chance Ed weighs in on a non-question message
+WEB_FETCH_TOOLS = [{"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 3}]
 
 URL_PATTERN = re.compile(r"https?://\S+", re.IGNORECASE)
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
@@ -281,13 +282,11 @@ class EdBot(commands.Cog):
     def cog_unload(self):
         self.idle_check_loop.cancel()
 
-    def _complete(self, system_prompt: str, messages: list[dict], model: str = MODEL):
-        response = self.client.messages.create(
-            model=model,
-            max_tokens=1024,
-            system=system_prompt,
-            messages=messages,
-        )
+    def _complete(self, system_prompt: str, messages: list[dict], model: str = MODEL, tools: list = None):
+        kwargs = dict(model=model, max_tokens=1024, system=system_prompt, messages=messages)
+        if tools:
+            kwargs["tools"] = tools
+        response = self.client.messages.create(**kwargs)
         text = next(block.text for block in response.content if block.type == "text")
         return text, response.usage
 
@@ -463,7 +462,9 @@ class EdBot(commands.Cog):
         member = await self._resolve_member(ctx)
         system_prompt = await self._ask_system_prompt(ctx.author, guild, member=member)
         user_content = _build_user_content(question, image_blocks)
-        reply, usage = self._complete(system_prompt, [{"role": "user", "content": user_content}])
+        reply, usage = self._complete(
+            system_prompt, [{"role": "user", "content": user_content}], tools=WEB_FETCH_TOOLS
+        )
         await self._add_usage(guild, "sonnet", usage)
         await self._send_chunked(ctx, reply)
 
@@ -868,11 +869,13 @@ class EdBot(commands.Cog):
                 async with message.channel.typing():
                     if content:
                         (reply, reply_usage), (analysis, analysis_usage) = await asyncio.gather(
-                            asyncio.to_thread(self._complete, system_prompt, history),
+                            asyncio.to_thread(self._complete, system_prompt, history, tools=WEB_FETCH_TOOLS),
                             asyncio.to_thread(self._analyze_message, content),
                         )
                     else:
-                        reply, reply_usage = await asyncio.to_thread(self._complete, system_prompt, history)
+                        reply, reply_usage = await asyncio.to_thread(
+                            self._complete, system_prompt, history, tools=WEB_FETCH_TOOLS
+                        )
                 history.append({"role": "assistant", "content": reply})
                 if image_blocks:
                     history[-2]["content"] = content or "[image attached]"
@@ -919,12 +922,20 @@ class EdBot(commands.Cog):
         async with message.channel.typing():
             if message.content:
                 (reply, reply_usage), (analysis, analysis_usage) = await asyncio.gather(
-                    asyncio.to_thread(self._complete, system_prompt, [{"role": "user", "content": user_content}]),
+                    asyncio.to_thread(
+                        self._complete,
+                        system_prompt,
+                        [{"role": "user", "content": user_content}],
+                        tools=WEB_FETCH_TOOLS,
+                    ),
                     asyncio.to_thread(self._analyze_message, message.content),
                 )
             else:
                 reply, reply_usage = await asyncio.to_thread(
-                    self._complete, system_prompt, [{"role": "user", "content": user_content}]
+                    self._complete,
+                    system_prompt,
+                    [{"role": "user", "content": user_content}],
+                    tools=WEB_FETCH_TOOLS,
                 )
                 analysis, analysis_usage = None, None
         if analysis is not None and analysis["user_fact_note"]:
