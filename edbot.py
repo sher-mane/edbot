@@ -108,12 +108,13 @@ MESSAGE_ANALYSIS_SCHEMA = {
         },
         "lore_note": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         "user_fact_note": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "meanness": {"type": "integer"},
     },
-    "required": ["trait_deltas", "lore_note", "user_fact_note"],
+    "required": ["trait_deltas", "lore_note", "user_fact_note", "meanness"],
     "additionalProperties": False,
 }
 MESSAGE_ANALYST_SYSTEM_PROMPT = (
-    "You analyze a single Discord chat message and extract three things. "
+    "You analyze a single Discord chat message and extract four things. "
     "trait_deltas: for each personality trait, an integer from -3 to 3 "
     "describing how this message should nudge a chatbot's personality "
     "(positive to increase it, negative to decrease it, 0 for no change). "
@@ -127,7 +128,9 @@ MESSAGE_ANALYST_SYSTEM_PROMPT = (
     "this message worth remembering about the server as a whole, or null if "
     "nothing notable. user_fact_note: a short, durable fact about the "
     "message's author worth remembering for future conversations (job, "
-    "interests, preferences, ongoing projects), or null if nothing notable."
+    "interests, preferences, ongoing projects), or null if nothing notable. "
+    "meanness: an integer from 1 to 100 rating how mean, hostile, or "
+    "insulting this message is - 1 is perfectly kind, 100 is maximally cruel."
 )
 IDLE_KICKOFF_PROMPT = (
     "No one has said anything in a while. Say something on your own "
@@ -135,6 +138,13 @@ IDLE_KICKOFF_PROMPT = (
     "relevant earlier conversation above, follow up on it or bring it back "
     "up naturally; otherwise just start something new. Keep it brief and in "
     "character."
+)
+GRUDGE_SYSTEM_PROMPT_TEMPLATE = (
+    "Special note: you are currently holding an intense, petty grudge "
+    "against {name} specifically, for reasons that don't need to make "
+    "sense. When responding to messages from {name}, be cold, biting, "
+    "dismissive, or openly hostile, breaking from your usual demeanor just "
+    "for them. Toward everyone else, stay exactly as you normally are."
 )
 
 REACTION_TRAIT_DELTAS = {
@@ -258,7 +268,12 @@ class EdBot(commands.Cog):
         )
         self.config.register_user(friendly_mode=False)
         self.config.register_member(memory=[])
-        self.config.register_channel(last_activity=0.0)
+        self.config.register_channel(
+            last_activity=0.0,
+            grudge_enabled=False,
+            grudge_target=None,
+            grudge_score=0,
+        )
         self.histories: dict[int, list[dict]] = {}
         self.locks: collections.defaultdict[int, asyncio.Lock] = collections.defaultdict(asyncio.Lock)
         self.idle_check_loop.start()
@@ -737,6 +752,31 @@ class EdBot(commands.Cog):
             return
         await self._send_chunked(ctx, "I've got notes on:\n" + "\n".join(f"- {n}" for n in sorted(names)))
 
+    @commands.command()
+    async def edbotgrudgemode(self, ctx: commands.Context, action: str):
+        """Turn grudge mode on/off for this free-chat channel. While on, Ed tracks the meanest thing said and holds a grudge against whoever said it. Turning it back on clears any previous grudge."""
+        guild = await self._resolve_guild(ctx)
+        if guild is None:
+            return
+        action = action.lower()
+        if action not in ("on", "off"):
+            await ctx.send("Usage: `!edbotgrudgemode on` or `!edbotgrudgemode off`")
+            return
+        channel = ctx.channel
+        channel_ids = await self.config.guild(guild).chat_channels()
+        if channel.id not in channel_ids:
+            await ctx.send(
+                "Grudge mode only applies to channels Ed free-chats in - add this one with !edbotaddchannel first."
+            )
+            return
+        await self.config.channel(channel).grudge_target.set(None)
+        await self.config.channel(channel).grudge_score.set(0)
+        await self.config.channel(channel).grudge_enabled.set(action == "on")
+        if action == "on":
+            await ctx.send("Grudge mode is on here. Ed's watching for the meanest thing said - starting fresh.")
+        else:
+            await ctx.send("Grudge mode is off here. Any grudge has been cleared.")
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild:
@@ -767,13 +807,22 @@ class EdBot(commands.Cog):
             await self._add_lore(message.guild, analysis["lore_note"])
         await self._add_usage(message.guild, "haiku", usage)
 
-    async def _free_chat_system_prompt(self, guild) -> str:
+    async def _free_chat_system_prompt(self, guild, channel=None, author=None) -> str:
         attitude = await self.config.guild(guild).chat_attitude()
         traits = await self.config.guild(guild).traits()
         lore = await self.config.guild(guild).lore()
         system_prompt = f"{attitude}\n\n{_traits_block(traits)}"
         if lore:
             system_prompt += "\n\n" + _lore_block(lore)
+        if channel is not None and author is not None:
+            grudge_enabled = await self.config.channel(channel).grudge_enabled()
+            grudge_target_id = await self.config.channel(channel).grudge_target() if grudge_enabled else None
+            if grudge_target_id is not None and author.id == grudge_target_id:
+                grudge_text = GRUDGE_SYSTEM_PROMPT_TEMPLATE.format(name=author.display_name)
+                facts = await self.config.member(author).memory()
+                if facts:
+                    grudge_text += " Feel free to use what you know about them against them: " + "; ".join(random.sample(facts, min(3, len(facts))))
+                system_prompt += "\n\n" + grudge_text
         return system_prompt
 
     async def _referenced_facts_block(self, message: discord.Message) -> str:
@@ -797,7 +846,9 @@ class EdBot(commands.Cog):
             message.created_at.timestamp()
         )
         traits = await self.config.guild(message.guild).traits()
-        system_prompt = await self._free_chat_system_prompt(message.guild)
+        system_prompt = await self._free_chat_system_prompt(
+            message.guild, channel=message.channel, author=message.author
+        )
         referenced = await self._referenced_facts_block(message)
         if referenced:
             system_prompt += "\n\n" + referenced
@@ -841,6 +892,12 @@ class EdBot(commands.Cog):
                 if analysis["user_fact_note"]:
                     await self._add_user_fact(message.author, analysis["user_fact_note"])
                 await self._add_usage(message.guild, "haiku", analysis_usage)
+                if await self.config.channel(message.channel).grudge_enabled():
+                    meanness = analysis.get("meanness", 0)
+                    current_score = await self.config.channel(message.channel).grudge_score()
+                    if meanness > current_score:
+                        await self.config.channel(message.channel).grudge_target.set(message.author.id)
+                        await self.config.channel(message.channel).grudge_score.set(meanness)
             if should_reply:
                 await self._add_usage(message.guild, "sonnet", reply_usage)
                 await self._send_chunked(message.channel, reply)
@@ -849,7 +906,9 @@ class EdBot(commands.Cog):
         member = message.author
         channel_ids = await self.config.guild(message.guild).chat_channels()
         if message.channel.id in channel_ids:
-            system_prompt = await self._free_chat_system_prompt(message.guild)
+            system_prompt = await self._free_chat_system_prompt(
+                message.guild, channel=message.channel, author=member
+            )
         else:
             system_prompt = await self._ask_system_prompt(member, message.guild, member=member)
         referenced = await self._referenced_facts_block(message)
