@@ -747,16 +747,21 @@ class EdBot(commands.Cog):
             await self._add_lore(message.guild, analysis["lore_note"])
         await self._add_usage(message.guild, "haiku", usage)
 
+    async def _free_chat_system_prompt(self, guild) -> str:
+        attitude = await self.config.guild(guild).chat_attitude()
+        traits = await self.config.guild(guild).traits()
+        lore = await self.config.guild(guild).lore()
+        system_prompt = f"{attitude}\n\n{_traits_block(traits)}"
+        if lore:
+            system_prompt += "\n\n" + _lore_block(lore)
+        return system_prompt
+
     async def _handle_free_chat(self, message: discord.Message):
         await self.config.channel(message.channel).last_activity.set(
             message.created_at.timestamp()
         )
-        attitude = await self.config.guild(message.guild).chat_attitude()
         traits = await self.config.guild(message.guild).traits()
-        lore = await self.config.guild(message.guild).lore()
-        system_prompt = f"{attitude}\n\n{_traits_block(traits)}"
-        if lore:
-            system_prompt += "\n\n" + _lore_block(lore)
+        system_prompt = await self._free_chat_system_prompt(message.guild)
         image_blocks = await self._image_content_blocks(message.attachments, message.content)
         user_content = _build_user_content(message.content, image_blocks)
         should_reply = (
@@ -802,7 +807,11 @@ class EdBot(commands.Cog):
 
     async def _handle_mention(self, message: discord.Message):
         member = message.author
-        system_prompt = await self._ask_system_prompt(member, message.guild, member=member)
+        channel_ids = await self.config.guild(message.guild).chat_channels()
+        if message.channel.id in channel_ids:
+            system_prompt = await self._free_chat_system_prompt(message.guild)
+        else:
+            system_prompt = await self._ask_system_prompt(member, message.guild, member=member)
         image_blocks = await self._image_content_blocks(message.attachments, message.content)
         user_content = _build_user_content(message.clean_content, image_blocks)
         async with message.channel.typing():
