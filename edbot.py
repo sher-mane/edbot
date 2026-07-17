@@ -249,6 +249,27 @@ def _load_api_key(conf_path: Path) -> str:
     return parser["DEFAULT"]["api_key"].strip('"')
 
 
+class _SafeTyping:
+    """channel.typing(), but a Discord hiccup on the typing call never kills the reply."""
+
+    def __init__(self, channel):
+        self._typing = channel.typing()
+        self._entered = False
+
+    async def __aenter__(self):
+        try:
+            await self._typing.__aenter__()
+            self._entered = True
+        except discord.HTTPException:
+            pass
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        if self._entered:
+            return await self._typing.__aexit__(exc_type, exc, tb)
+        return False
+
+
 class EdBot(commands.Cog):
     """Snarky Claude-powered bot with an optional free-chat mode."""
 
@@ -866,7 +887,7 @@ class EdBot(commands.Cog):
             history.append({"role": "user", "content": user_content})
             analysis = analysis_usage = reply = reply_usage = None
             if should_reply:
-                async with message.channel.typing():
+                async with _SafeTyping(message.channel):
                     if content:
                         (reply, reply_usage), (analysis, analysis_usage) = await asyncio.gather(
                             asyncio.to_thread(self._complete, system_prompt, history, tools=WEB_FETCH_TOOLS),
@@ -919,7 +940,7 @@ class EdBot(commands.Cog):
             system_prompt += "\n\n" + referenced
         image_blocks = await self._image_content_blocks(message.attachments, message.content)
         user_content = _build_user_content(message.clean_content, image_blocks)
-        async with message.channel.typing():
+        async with _SafeTyping(message.channel):
             if message.content:
                 (reply, reply_usage), (analysis, analysis_usage) = await asyncio.gather(
                     asyncio.to_thread(
