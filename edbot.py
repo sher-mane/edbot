@@ -633,6 +633,32 @@ class EdBot(commands.Cog):
         await self._start_download(ctx, "standup", link)
 
     @commands.command()
+    async def whatsnew(self, ctx: commands.Context):
+        """Show what's new in the media library over the last 7 days."""
+        script_path = SCRIPTS_DIR / "whatsnew.sh"
+        async with _SafeTyping(ctx.channel):
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    str(script_path),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await process.communicate()
+            except OSError as e:
+                await ctx.send(f"Failed to run whatsnew script: {e}")
+                return
+        if process.returncode != 0:
+            tail = stderr.decode(errors="ignore").strip().splitlines()[-5:]
+            detail = "\n".join(tail) or "(no error output)"
+            await self._send_chunked(ctx, f"whatsnew failed (exit {process.returncode}):\n```\n{detail}\n```")
+            return
+        items = stdout.decode(errors="ignore").strip()
+        if not items:
+            await ctx.send("Nothing new in the last week.")
+            return
+        await self._send_chunked(ctx, "Here's what's new this week:\n" + items)
+
+    @commands.command()
     async def edbotaddchannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Add a channel Ed chats freely in."""
         guild = await self._resolve_guild(ctx)
