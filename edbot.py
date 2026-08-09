@@ -15,6 +15,9 @@ import discord
 from discord.ext import tasks
 from redbot.core import Config, commands
 
+SCRIPTS_DIR = Path(__file__).parent / "scripts"
+DOWNLOAD_CATEGORIES = ("music", "nature", "nostalgia", "relax", "science", "standup")
+
 MODEL = "claude-sonnet-5"
 HISTORY_LIMIT = 20  # ~10 user/assistant turns kept per channel
 IDLE_THRESHOLD_SECONDS = 10 * 60 * 60  # 10 hours
@@ -315,6 +318,38 @@ class EdBot(commands.Cog):
         for i in range(0, len(text), 2000):
             await destination.send(text[i : i + 2000])
 
+    async def _start_download(self, ctx: commands.Context, category: str, link: str):
+        link = link.strip()
+        if not link or link.startswith("-"):
+            await ctx.send("That doesn't look like a valid link.")
+            return
+        await ctx.send(f"Queued download to {category}: {link}")
+        asyncio.create_task(self._run_download(ctx, category, link))
+
+    async def _run_download(self, ctx: commands.Context, category: str, link: str):
+        script_path = SCRIPTS_DIR / f"download_to_{category}.sh"
+        try:
+            process = await asyncio.create_subprocess_exec(
+                str(script_path), link,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+        except OSError as e:
+            await ctx.send(f"Failed to start download script for {category}: {e}")
+            return
+        if process.returncode == 0:
+            if "has already been downloaded" in stdout.decode(errors="ignore"):
+                await ctx.send(f"{ctx.author.mention} That's already in the {category} library - skipped.")
+            else:
+                await ctx.send(f"{ctx.author.mention} Download to {category} finished.")
+        else:
+            tail = stderr.decode(errors="ignore").strip().splitlines()[-5:]
+            detail = "\n".join(tail) or "(no error output)"
+            await self._send_chunked(
+                ctx, f"{ctx.author.mention} Download to {category} failed (exit {process.returncode}):\n```\n{detail}\n```"
+            )
+
     def _guild_for_context(self, ctx: commands.Context):
         if ctx.guild is not None:
             return ctx.guild
@@ -566,6 +601,36 @@ class EdBot(commands.Cog):
         )
         await self._add_usage(self._guild_for_context(ctx), "sonnet", usage)
         await self._send_chunked(ctx, reply)
+
+    @commands.command()
+    async def music(self, ctx: commands.Context, link: str):
+        """Download a video to the music library. Usage: !music <link> (quotes optional)"""
+        await self._start_download(ctx, "music", link)
+
+    @commands.command()
+    async def nature(self, ctx: commands.Context, link: str):
+        """Download a video to the nature library. Usage: !nature <link> (quotes optional)"""
+        await self._start_download(ctx, "nature", link)
+
+    @commands.command()
+    async def nostalgia(self, ctx: commands.Context, link: str):
+        """Download a video to the nostalgia library. Usage: !nostalgia <link> (quotes optional)"""
+        await self._start_download(ctx, "nostalgia", link)
+
+    @commands.command()
+    async def relax(self, ctx: commands.Context, link: str):
+        """Download a video to the relax library. Usage: !relax <link> (quotes optional)"""
+        await self._start_download(ctx, "relax", link)
+
+    @commands.command()
+    async def science(self, ctx: commands.Context, link: str):
+        """Download a video to the science library. Usage: !science <link> (quotes optional)"""
+        await self._start_download(ctx, "science", link)
+
+    @commands.command()
+    async def standup(self, ctx: commands.Context, link: str):
+        """Download a video to the standup library. Usage: !standup <link> (quotes optional)"""
+        await self._start_download(ctx, "standup", link)
 
     @commands.command()
     async def edbotaddchannel(self, ctx: commands.Context, channel: discord.TextChannel):
